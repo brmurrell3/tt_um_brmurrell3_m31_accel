@@ -28,12 +28,13 @@ module tt_um_brmurrell3_m31_accel (
     // Registers
     reg [31:0] reg_a;
     reg [31:0] reg_b;
-    reg [31:0] reg_c;      // NEW: third register for MAC
-    reg        mac_mode;   // NEW: flag for MAC operation
+    reg [31:0] reg_c;      // Third register for MAC
+    reg        mac_mode;   // Flag for MAC operation
     reg [1:0]  read_counter;
     reg [4:0]  mul_counter;
     reg [61:0] mul_accum;
     reg [30:0] mul_b_shift;
+    reg [30:0] mul_operand_r;  // Captured operand - removes mux from critical path
 
     // Opcodes
     localparam OP_NOP = 4'h0;
@@ -56,9 +57,9 @@ module tt_um_brmurrell3_m31_accel (
 
     // M31 Multiplication: shift-and-add, MSB-first
     // MUL: reg_a × reg_b, MAC: reg_b × reg_c
-    wire [30:0] mul_operand = mac_mode ? reg_b[30:0] : reg_a[30:0];
+    // mul_operand_r is captured at multiply start to remove mux from critical path
     wire [61:0] mul_shifted = mul_accum << 1;
-    wire [61:0] mul_next_accum = mul_b_shift[30] ? (mul_shifted + {31'b0, mul_operand}) : mul_shifted;
+    wire [61:0] mul_next_accum = mul_b_shift[30] ? (mul_shifted + {31'b0, mul_operand_r}) : mul_shifted;
 
     // 62-bit to 31-bit reduction
     wire [31:0] mul_low = mul_next_accum[30:0];
@@ -78,13 +79,19 @@ module tt_um_brmurrell3_m31_accel (
     wire busy = (mul_counter != 5'b0);
     assign uio_out = {7'b0, busy};
 
-    wire [31:0] read_reg = (reg_sel == 2'b00) ? reg_a :
-                          (reg_sel == 2'b01) ? reg_b :
-                          (reg_sel == 2'b10) ? reg_c : 32'b0;
-    wire [7:0] read_byte = (read_counter == 2'd0) ? read_reg[7:0]   :
-                           (read_counter == 2'd1) ? read_reg[15:8]  :
-                           (read_counter == 2'd2) ? read_reg[23:16] :
-                                                    read_reg[31:24];
+    // Optimized read_reg mux: binary tree structure for better synthesis
+    wire [31:0] read_reg = reg_sel[1] ? reg_c : (reg_sel[0] ? reg_b : reg_a);
+
+    // Optimized read_byte mux: direct bit-slice selection
+    reg [7:0] read_byte;
+    always @(*) begin
+        case (read_counter)
+            2'd0: read_byte = read_reg[7:0];
+            2'd1: read_byte = read_reg[15:8];
+            2'd2: read_byte = read_reg[23:16];
+            2'd3: read_byte = read_reg[31:24];
+        endcase
+    end
     assign uo_out = read_byte;
 
     always @(posedge clk or negedge rst_n) begin
@@ -97,6 +104,7 @@ module tt_um_brmurrell3_m31_accel (
             mul_counter  <= 5'b0;
             mul_accum    <= 62'b0;
             mul_b_shift  <= 31'b0;
+            mul_operand_r <= 31'b0;
         end else begin
             // Register load (CMD_EN=0, RW=0, not busy)
             if (!cmd_en && !rw && !busy) begin
@@ -134,14 +142,16 @@ module tt_um_brmurrell3_m31_accel (
                     OP_ADD: reg_a <= add_result;
                     OP_SUB: reg_a <= sub_result;
                     OP_MUL: begin
-                        mul_counter <= 5'd31;
-                        mul_accum   <= 62'b0;
-                        mul_b_shift <= reg_b[30:0];
+                        mul_counter   <= 5'd31;
+                        mul_accum     <= 62'b0;
+                        mul_b_shift   <= reg_b[30:0];
+                        mul_operand_r <= reg_a[30:0];  // Capture operand at start
                     end
                     OP_MAC: begin
-                        mul_counter <= 5'd31;
-                        mul_accum   <= 62'b0;
-                        mul_b_shift <= reg_c[30:0];  // MAC uses reg_c
+                        mul_counter   <= 5'd31;
+                        mul_accum     <= 62'b0;
+                        mul_b_shift   <= reg_c[30:0];  // MAC uses reg_c
+                        mul_operand_r <= reg_b[30:0];  // MAC multiplies reg_b
                     end
                     OP_CLR: begin
                         reg_a <= 32'b0;
