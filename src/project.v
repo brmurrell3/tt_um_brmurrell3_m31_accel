@@ -42,7 +42,7 @@ module tt_um_brmurrell3_m31_accel (
     localparam OP_SUB = 4'h2;
     localparam OP_MUL = 4'h3;
     localparam OP_CLR = 4'h4;
-    localparam OP_MAC = 4'h5;  // NEW: MAC opcode
+    localparam OP_MAC = 4'h5;
 
     wire [3:0] opcode = ui_in[3:0];
 

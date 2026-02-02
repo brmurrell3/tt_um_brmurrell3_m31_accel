@@ -211,7 +211,7 @@ async def test_mul(dut):
 
 @cocotb.test()
 async def test_busy_timing(dut):
-    clock = Clock(dut.clk, 10, units="us")
+    clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
     await reset_dut(dut)
 
@@ -389,7 +389,7 @@ async def test_nop_and_reserved(dut):
 
 @cocotb.test()
 async def test_busy_protection(dut):
-    clock = Clock(dut.clk, 10, units="us")
+    clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
     await reset_dut(dut)
 
@@ -1375,7 +1375,7 @@ async def test_mac_reg_c_load_and_read(dut):
 @cocotb.test()
 async def test_mac_busy_protection(dut):
     """Test that operations during MAC BUSY are ignored."""
-    clock = Clock(dut.clk, 10, units="us")
+    clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
     await reset_dut(dut)
 
