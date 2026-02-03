@@ -216,6 +216,7 @@ module tt_um_brmurrell3_m31_accel (
         assert(reg_b == 0);
         assert(reg_c == 0);
         assert(mul_counter == 0);
+        assert(read_counter == 0);
     end
 
     // BUSY signal
