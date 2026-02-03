@@ -44,9 +44,9 @@ pinout:
 
   # Bidirectional pins - Control signals
   uio[0]: "CMD_EN (in) / BUSY (out)"
-  uio[1]: "REG_SEL (input)"
+  uio[1]: "REG_SEL[0] (input)"
   uio[2]: "RW (input)"
-  uio[3]: ""
+  uio[3]: "REG_SEL[1] (input)"
   uio[4]: ""
   uio[5]: ""
   uio[6]: ""
