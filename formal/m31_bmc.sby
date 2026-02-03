@@ -1,0 +1,13 @@
+[options]
+mode bmc
+depth 40
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal project.v
+prep -top tt_um_brmurrell3_m31_accel
+
+[files]
+../src/project.v

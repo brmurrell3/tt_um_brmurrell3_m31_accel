@@ -36,8 +36,13 @@ module tt_um_brmurrell3_m31_accel (
     reg [30:0] mul_b_shift;
     reg [30:0] mul_operand_r;  // Captured operand - removes mux from critical path
 
-    // Opcodes
+    // Mersenne-31 prime: p = 2^31 - 1
+    localparam [31:0] P = 32'h7FFFFFFF;
+
+    // Opcodes (OP_NOP handled by default case)
+    /* verilator lint_off UNUSEDPARAM */
     localparam OP_NOP = 4'h0;
+    /* verilator lint_on UNUSEDPARAM */
     localparam OP_ADD = 4'h1;
     localparam OP_SUB = 4'h2;
     localparam OP_MUL = 4'h3;
@@ -46,14 +51,22 @@ module tt_um_brmurrell3_m31_accel (
 
     wire [3:0] opcode = ui_in[3:0];
 
-    // M31 Addition: (a + b) mod p using bit-folding since 2^31 = 1 (mod p)
+    // M31 Addition: (a + b) mod p using bit-folding since 2^31 ≡ 1 (mod p)
+    // Inputs are in [0, P-1], so sum of 31-bit values is at most 2P-2.
+    // After folding, result is at most P. Use == P check (not >=) because
+    // the maximum folded value is exactly P when inputs sum to 2P-2.
     wire [31:0] add_raw = reg_a[30:0] + reg_b[30:0];
-    wire [31:0] add_fold = add_raw[30:0] + add_raw[31];
-    wire [31:0] add_result = (add_fold == 32'h7FFFFFFF) ? 32'b0 : add_fold;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [31:0] add_fold = add_raw[30:0] + add_raw[31];  // Intentional: fold carry bit
+    /* verilator lint_on WIDTHEXPAND */
+    wire [31:0] add_result = (add_fold == P) ? 32'b0 : add_fold;
 
     // M31 Subtraction: (a - b) mod p
+    // If result is negative (underflow), add P to wrap into [0, P-1].
     wire signed [31:0] sub_signed = $signed({1'b0, reg_a[30:0]}) - $signed({1'b0, reg_b[30:0]});
-    wire [31:0] sub_result = sub_signed[31] ? (sub_signed + 32'h7FFFFFFF) : sub_signed[30:0];
+    /* verilator lint_off WIDTHEXPAND */
+    wire [31:0] sub_result = sub_signed[31] ? (sub_signed + P) : sub_signed[30:0];  // Intentional: 31-bit result
+    /* verilator lint_on WIDTHEXPAND */
 
     // M31 Multiplication: shift-and-add, MSB-first
     // MUL: reg_a × reg_b, MAC: reg_b × reg_c
@@ -61,17 +74,27 @@ module tt_um_brmurrell3_m31_accel (
     wire [61:0] mul_shifted = mul_accum << 1;
     wire [61:0] mul_next_accum = mul_b_shift[30] ? (mul_shifted + {31'b0, mul_operand_r}) : mul_shifted;
 
-    // 62-bit to 31-bit reduction
-    wire [31:0] mul_low = mul_next_accum[30:0];
-    wire [31:0] mul_high = mul_next_accum[61:31];
-    wire [32:0] mul_fold1 = mul_low + mul_high;
-    wire [31:0] mul_fold2 = mul_fold1[30:0] + mul_fold1[31];
-    wire [31:0] mul_result = (mul_fold2 >= 32'h7FFFFFFF) ? (mul_fold2 - 32'h7FFFFFFF) : mul_fold2;
+    // 62-bit to 31-bit reduction using double bit-folding
+    // Product of two 31-bit values can be up to 62 bits. After two folds,
+    // result can be up to P+1, so we use >= P check with subtraction.
+    /* verilator lint_off WIDTHEXPAND */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [31:0] mul_low = mul_next_accum[30:0];   // Intentional: extract lower 31 bits
+    wire [31:0] mul_high = mul_next_accum[61:31]; // Intentional: extract upper 31 bits
+    wire [32:0] mul_fold1 = mul_low + mul_high;   // mul_fold1[32] unused (folded via [31])
+    wire [31:0] mul_fold2 = mul_fold1[30:0] + mul_fold1[31];  // Intentional: fold carry bit
+    /* verilator lint_on UNUSEDSIGNAL */
+    /* verilator lint_on WIDTHEXPAND */
+    wire [31:0] mul_result = (mul_fold2 >= P) ? (mul_fold2 - P) : mul_fold2;
 
     // MAC result: mul_result + reg_a (reg_a preserved during multiply)
+    // Both mul_result and reg_a are in [0, P-1], so same logic as ADD applies:
+    // after folding, maximum value is exactly P, so == P check suffices.
     wire [31:0] mac_sum = mul_result[30:0] + reg_a[30:0];
-    wire [31:0] mac_fold = mac_sum[30:0] + mac_sum[31];
-    wire [31:0] mac_result = (mac_fold == 32'h7FFFFFFF) ? 32'b0 : mac_fold;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [31:0] mac_fold = mac_sum[30:0] + mac_sum[31];  // Intentional: fold carry bit
+    /* verilator lint_on WIDTHEXPAND */
+    wire [31:0] mac_result = (mac_fold == P) ? 32'b0 : mac_fold;
 
     // Outputs
     assign uio_oe = 8'b00000001;
@@ -165,5 +188,90 @@ module tt_um_brmurrell3_m31_accel (
     end
 
     wire _unused = &{ena, uio_in[7:4], 1'b0};
+
+    //=========================================================================
+    // Formal Verification
+    //=========================================================================
+`ifdef FORMAL
+    // Track valid past state for formal verification
+    reg f_past_valid;
+    initial f_past_valid = 1'b0;
+    always @(posedge clk)
+        f_past_valid <= 1'b1;
+
+    // Assume reset is applied at start
+    initial assume(!rst_n);
+
+    //-------------------------------------------------------------------------
+    // Assumption: User loads valid field elements (values < P)
+    // This constrains the verification to valid usage scenarios.
+    // The arithmetic operations produce correct results even for invalid
+    // inputs (they use only bits [30:0]), but we verify under valid usage.
+    //-------------------------------------------------------------------------
+    always @(*) begin
+        assume(reg_a < P);
+        assume(reg_b < P);
+        assume(reg_c < P);
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Arithmetic results stay in field [0, P-1]
+    // Given valid inputs, outputs remain valid field elements.
+    //-------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (rst_n) begin
+            assert(add_result < P);
+            assert(sub_result < P);
+            assert(mul_result < P);
+            assert(mac_result < P);
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Reset clears all registers
+    //-------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (f_past_valid && !$past(rst_n)) begin
+            assert(reg_a == 32'b0);
+            assert(reg_b == 32'b0);
+            assert(reg_c == 32'b0);
+            assert(mul_counter == 5'b0);
+            assert(read_counter == 2'b0);
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: BUSY signal correctness
+    //-------------------------------------------------------------------------
+    // BUSY is high if and only if mul_counter != 0
+    always @(*) begin
+        assert(busy == (mul_counter != 5'b0));
+    end
+
+    // mul_counter never exceeds 31
+    always @(*) begin
+        assert(mul_counter <= 5'd31);
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Register stability during BUSY
+    //-------------------------------------------------------------------------
+    // reg_b and reg_c are stable during multiplication (not modified)
+    always @(posedge clk) begin
+        if (f_past_valid && $past(rst_n) && rst_n && $past(busy) && busy) begin
+            assert($stable(reg_b));
+            assert($stable(reg_c));
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Multiplication timing - counter decrements each cycle
+    //-------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (f_past_valid && rst_n && $past(rst_n) && $past(busy)) begin
+            assert(mul_counter == $past(mul_counter) - 5'd1);
+        end
+    end
+`endif
 
 endmodule

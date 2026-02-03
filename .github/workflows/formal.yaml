@@ -1,0 +1,36 @@
+name: Formal Verification
+
+on: [push, workflow_dispatch]
+
+jobs:
+  formal:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install OSS CAD Suite
+        run: |
+          wget -q https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2024-02-14/oss-cad-suite-linux-x64-20240214.tgz
+          tar -xzf oss-cad-suite-linux-x64-20240214.tgz
+          echo "$PWD/oss-cad-suite/bin" >> $GITHUB_PATH
+
+      - name: Run BMC (Bounded Model Checking)
+        run: |
+          cd formal
+          sby -f m31_bmc.sby
+
+      - name: Run Cover (Reachability)
+        if: success() || failure()
+        run: |
+          cd formal
+          sby -f m31_cover.sby
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-traces
+          path: |
+            formal/m31_bmc/
+            formal/m31_cover/
