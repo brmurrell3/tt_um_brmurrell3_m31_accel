@@ -189,4 +189,75 @@ module tt_um_brmurrell3_m31_accel (
 
     wire _unused = &{ena, uio_in[7:4], 1'b0};
 
+    //=========================================================================
+    // Formal Verification
+    //=========================================================================
+`ifdef FORMAL
+    // Track valid past state for formal verification
+    reg f_past_valid;
+    initial f_past_valid = 1'b0;
+    always @(posedge clk)
+        f_past_valid <= 1'b1;
+
+    // Assume reset is applied at start
+    initial assume(!rst_n);
+
+    //-------------------------------------------------------------------------
+    // Property: Field membership - all registers must be in [0, P-1]
+    //-------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (rst_n) begin
+            assert(reg_a < P);
+            assert(reg_b < P);
+            assert(reg_c < P);
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Reset clears all registers
+    //-------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (f_past_valid && !$past(rst_n)) begin
+            assert(reg_a == 32'b0);
+            assert(reg_b == 32'b0);
+            assert(reg_c == 32'b0);
+            assert(mul_counter == 5'b0);
+            assert(read_counter == 2'b0);
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: BUSY signal correctness
+    //-------------------------------------------------------------------------
+    // BUSY is high if and only if mul_counter != 0
+    always @(*) begin
+        assert(busy == (mul_counter != 5'b0));
+    end
+
+    // mul_counter never exceeds 31
+    always @(*) begin
+        assert(mul_counter <= 5'd31);
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Register stability during BUSY
+    //-------------------------------------------------------------------------
+    // reg_b and reg_c are stable during multiplication (not modified)
+    always @(posedge clk) begin
+        if (f_past_valid && $past(rst_n) && rst_n && $past(busy) && busy) begin
+            assert($stable(reg_b));
+            assert($stable(reg_c));
+        end
+    end
+
+    //-------------------------------------------------------------------------
+    // Property: Multiplication timing - counter decrements each cycle
+    //-------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (f_past_valid && rst_n && $past(rst_n) && $past(busy)) begin
+            assert(mul_counter == $past(mul_counter) - 5'd1);
+        end
+    end
+`endif
+
 endmodule
