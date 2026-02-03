@@ -6,8 +6,8 @@ depth 40
 smtbmc z3
 
 [script]
-read -formal src/project.v
+read -formal project.v
 prep -top tt_um_brmurrell3_m31_accel
 
 [files]
-src/project.v
+../src/project.v
