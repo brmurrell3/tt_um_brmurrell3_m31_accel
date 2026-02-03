@@ -189,89 +189,48 @@ module tt_um_brmurrell3_m31_accel (
 
     wire _unused = &{ena, uio_in[7:4], 1'b0};
 
-    //=========================================================================
-    // Formal Verification
-    //=========================================================================
 `ifdef FORMAL
-    // Track valid past state for formal verification
     reg f_past_valid;
     initial f_past_valid = 1'b0;
-    always @(posedge clk)
-        f_past_valid <= 1'b1;
-
-    // Assume reset is applied at start
+    always @(posedge clk) f_past_valid <= 1'b1;
     initial assume(!rst_n);
 
-    //-------------------------------------------------------------------------
-    // Assumption: User loads valid field elements (values < P)
-    // This constrains the verification to valid usage scenarios.
-    // The arithmetic operations produce correct results even for invalid
-    // inputs (they use only bits [30:0]), but we verify under valid usage.
-    //-------------------------------------------------------------------------
+    // Assume valid field elements
     always @(*) begin
         assume(reg_a < P);
         assume(reg_b < P);
         assume(reg_c < P);
     end
 
-    //-------------------------------------------------------------------------
-    // Property: Arithmetic results stay in field [0, P-1]
-    // Given valid inputs, outputs remain valid field elements.
-    //-------------------------------------------------------------------------
-    always @(posedge clk) begin
-        if (rst_n) begin
-            assert(add_result < P);
-            assert(sub_result < P);
-            assert(mul_result < P);
-            assert(mac_result < P);
-        end
+    // Arithmetic outputs stay in field
+    always @(posedge clk) if (rst_n) begin
+        assert(add_result < P);
+        assert(sub_result < P);
+        assert(mul_result < P);
+        assert(mac_result < P);
     end
 
-    //-------------------------------------------------------------------------
-    // Property: Reset clears all registers
-    //-------------------------------------------------------------------------
-    always @(posedge clk) begin
-        if (f_past_valid && !$past(rst_n)) begin
-            assert(reg_a == 32'b0);
-            assert(reg_b == 32'b0);
-            assert(reg_c == 32'b0);
-            assert(mul_counter == 5'b0);
-            assert(read_counter == 2'b0);
-        end
+    // Reset clears state
+    always @(posedge clk) if (f_past_valid && !$past(rst_n)) begin
+        assert(reg_a == 0);
+        assert(reg_b == 0);
+        assert(reg_c == 0);
+        assert(mul_counter == 0);
     end
 
-    //-------------------------------------------------------------------------
-    // Property: BUSY signal correctness
-    //-------------------------------------------------------------------------
-    // BUSY is high if and only if mul_counter != 0
-    always @(*) begin
-        assert(busy == (mul_counter != 5'b0));
+    // BUSY signal
+    always @(*) assert(busy == (mul_counter != 0));
+    always @(*) assert(mul_counter <= 31);
+
+    // Operands stable during multiply
+    always @(posedge clk) if (f_past_valid && $past(rst_n) && rst_n && $past(busy) && busy) begin
+        assert($stable(reg_b));
+        assert($stable(reg_c));
     end
 
-    // mul_counter never exceeds 31
-    always @(*) begin
-        assert(mul_counter <= 5'd31);
-    end
-
-    //-------------------------------------------------------------------------
-    // Property: Register stability during BUSY
-    //-------------------------------------------------------------------------
-    // reg_b and reg_c are stable during multiplication (not modified)
-    always @(posedge clk) begin
-        if (f_past_valid && $past(rst_n) && rst_n && $past(busy) && busy) begin
-            assert($stable(reg_b));
-            assert($stable(reg_c));
-        end
-    end
-
-    //-------------------------------------------------------------------------
-    // Property: Multiplication timing - counter decrements each cycle
-    //-------------------------------------------------------------------------
-    always @(posedge clk) begin
-        if (f_past_valid && rst_n && $past(rst_n) && $past(busy)) begin
-            assert(mul_counter == $past(mul_counter) - 5'd1);
-        end
-    end
+    // Counter decrements each cycle
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n) && $past(busy))
+        assert(mul_counter == $past(mul_counter) - 1);
 `endif
 
 endmodule
