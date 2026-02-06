@@ -35,6 +35,7 @@ module tt_um_brmurrell3_m31_accel (
     reg [61:0] mul_accum;
     reg [30:0] mul_b_shift;
     reg [30:0] mul_operand_r;  // Captured operand - removes mux from critical path
+    reg        reducing;       // Pipeline stage: reduction in progress
 
     // Mersenne-31 prime: p = 2^31 - 1
     localparam [31:0] P = 32'h7FFFFFFF;
@@ -80,10 +81,12 @@ module tt_um_brmurrell3_m31_accel (
     // 62-bit to 31-bit reduction using double bit-folding
     // Product of two 31-bit values can be up to 62 bits. After two folds,
     // result can be up to P. Speculative subtraction selects via borrow bit.
+    // Reads from mul_accum (registered) rather than mul_next_accum (combinational)
+    // to pipeline the reduction — fires on the cycle after the inner loop completes.
     /* verilator lint_off WIDTHEXPAND */
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [31:0] mul_low = mul_next_accum[30:0];   // Intentional: extract lower 31 bits
-    wire [31:0] mul_high = mul_next_accum[61:31]; // Intentional: extract upper 31 bits
+    wire [31:0] mul_low = mul_accum[30:0];   // Intentional: extract lower 31 bits
+    wire [31:0] mul_high = mul_accum[61:31]; // Intentional: extract upper 31 bits
     wire [32:0] mul_fold1 = mul_low + mul_high;   // mul_fold1[32] unused (folded via [31])
     wire [31:0] mul_fold2 = mul_fold1[30:0] + mul_fold1[31];  // Intentional: fold carry bit
     /* verilator lint_on UNUSEDSIGNAL */
@@ -108,7 +111,7 @@ module tt_um_brmurrell3_m31_accel (
     // Outputs
     assign uio_oe = 8'b00000001;
 
-    wire busy = (mul_counter != 5'b0);
+    wire busy = (mul_counter != 5'b0) || reducing;
     assign uio_out = {7'b0, busy};
 
     // Optimized read_reg mux: binary tree structure for better synthesis
@@ -137,6 +140,7 @@ module tt_um_brmurrell3_m31_accel (
             mul_accum    <= 62'b0;
             mul_b_shift  <= 31'b0;
             mul_operand_r <= 31'b0;
+            reducing     <= 1'b0;
         end else begin
             // Register load (CMD_EN=0, RW=0, not busy)
             if (!cmd_en && !rw && !busy) begin
@@ -162,13 +166,19 @@ module tt_um_brmurrell3_m31_accel (
             end
 
             // Multiplication state machine (shared by MUL and MAC)
-            if (busy) begin
+            // Pipelined: inner loop (31 cycles) then reduction (1 cycle)
+            if (mul_counter != 5'b0) begin
+                // Inner loop: shift-and-add
                 mul_accum <= mul_next_accum;
                 mul_b_shift <= mul_b_shift << 1;
                 mul_counter <= mul_counter - 5'd1;
 
                 if (mul_counter == 5'd1)
-                    reg_a <= mac_mode ? mac_result : mul_result;
+                    reducing <= 1'b1;
+            end else if (reducing) begin
+                // Pipeline stage 2: reduce and write result
+                reg_a <= mac_mode ? mac_result : mul_result;
+                reducing <= 1'b0;
             end else if (cmd_en) begin
                 case (opcode)
                     OP_ADD: reg_a <= add_result;
@@ -218,7 +228,7 @@ module tt_um_brmurrell3_m31_accel (
     always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n)) begin
         if ($past(cmd_en) && !$past(busy))
             assert(reg_a < P);
-        if ($past(busy) && $past(mul_counter) == 5'd1)
+        if ($past(reducing))
             assert(reg_a < P);
     end
 
@@ -253,11 +263,17 @@ module tt_um_brmurrell3_m31_accel (
         assert(reg_c == 0);
         assert(mul_counter == 0);
         assert(read_counter == 0);
+        assert(reducing == 0);
     end
 
     // BUSY signal
-    always @(*) assert(busy == (mul_counter != 0));
+    always @(*) assert(busy == (mul_counter != 0 || reducing));
     always @(*) assert(mul_counter <= 31);
+
+    // Reducing invariants
+    always @(*) if (reducing) assert(mul_counter == 0);
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n))
+        assert(!($past(reducing) && reducing));  // At most one cycle
 
     // Operands stable during multiply
     always @(posedge clk) if (f_past_valid && $past(rst_n) && rst_n && $past(busy) && busy) begin
@@ -265,8 +281,8 @@ module tt_um_brmurrell3_m31_accel (
         assert($stable(reg_c));
     end
 
-    // Counter decrements each cycle
-    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n) && $past(busy))
+    // Counter decrements each cycle (only when counter was nonzero, not during reducing)
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n) && $past(mul_counter != 0))
         assert(mul_counter == $past(mul_counter) - 1);
 `endif
 

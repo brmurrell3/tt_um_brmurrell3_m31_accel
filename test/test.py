@@ -231,7 +231,7 @@ async def test_busy_timing(dut):
         cycle_count += 1
         assert cycle_count < 40, "BUSY stuck high"
 
-    assert 30 <= cycle_count <= 32, f"expected ~31 cycles, got {cycle_count}"
+    assert 31 <= cycle_count <= 33, f"expected ~32 cycles, got {cycle_count}"
     dut._log.info(f"busy_timing: passed ({cycle_count} cycles)")
 
 
@@ -1129,7 +1129,7 @@ async def test_mac_operand_preservation(dut):
 
 @cocotb.test()
 async def test_mac_busy_timing(dut):
-    """Test BUSY signal timing for MAC (should be 31 cycles like MUL)."""
+    """Test BUSY signal timing for MAC (should be 32 cycles like MUL)."""
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
     await reset_dut(dut)
@@ -1149,9 +1149,9 @@ async def test_mac_busy_timing(dut):
         # Use execute_mac helper which handles timing correctly
         cycle_count = await execute_mac(dut)
 
-        # Should be approximately 31 cycles (same as MUL)
-        # The execute_mac waits 2 cycles before counting, so we expect ~29-30
-        assert 28 <= cycle_count <= 32, f"MAC timing: expected ~30 cycles, got {cycle_count}"
+        # Should be approximately 32 cycles (same as MUL, including pipelined reduction)
+        # The execute_mac waits 2 cycles before counting, so we expect ~30-31
+        assert 29 <= cycle_count <= 33, f"MAC timing: expected ~31 cycles, got {cycle_count}"
 
     dut._log.info("mac_busy_timing: passed (3 timing tests)")
 

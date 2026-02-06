@@ -20,9 +20,9 @@ The accelerator contains three 32-bit registers (A, B, C) and supports the follo
 | 0x0 | NOP | No operation | 1 |
 | 0x1 | ADD | A = (A + B) mod p | 1 |
 | 0x2 | SUB | A = (A - B) mod p | 1 |
-| 0x3 | MUL | A = (A × B) mod p | 31 |
+| 0x3 | MUL | A = (A × B) mod p | 32 |
 | 0x4 | CLR | Clear all registers | 1 |
-| 0x5 | MAC | A = (A + B × C) mod p | 31 |
+| 0x5 | MAC | A = (A + B × C) mod p | 32 |
 
 ### Modular Reduction
 
@@ -102,7 +102,7 @@ clock; result[31:24] = uo_out  # 0x00
 
 ### Testing Multiplication
 
-For MUL and MAC operations, poll the BUSY signal (uio_out[0]) and wait for it to go low before reading the result. These operations take 31 clock cycles.
+For MUL and MAC operations, poll the BUSY signal (uio_out[0]) and wait for it to go low before reading the result. These operations take 32 clock cycles.
 
 ### Important: Read Counter Reset
 
@@ -116,7 +116,7 @@ The design includes a comprehensive test suite with 34 tests covering:
 - Register load/read operations
 - All arithmetic operations (ADD, SUB, MUL, MAC)
 - Edge cases (overflow, underflow, P-1 values)
-- Timing verification (31-cycle multiply)
+- Timing verification (32-cycle multiply)
 - Mathematical properties (commutativity, distributivity)
 
 ## External hardware

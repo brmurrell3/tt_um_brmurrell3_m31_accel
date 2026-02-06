@@ -7,8 +7,8 @@ Hardware accelerator for modular arithmetic over the Mersenne-31 prime field (p 
 ## Features
 
 - **ADD/SUB**: Single-cycle modular addition and subtraction
-- **MUL**: 31-cycle modular multiplication using shift-and-add
-- **MAC**: 31-cycle multiply-accumulate for inner products
+- **MUL**: 32-cycle modular multiplication using shift-and-add
+- **MAC**: 32-cycle multiply-accumulate for inner products
 - **Three 32-bit registers**: A (accumulator), B, C (operands)
 
 ## Quick Start
