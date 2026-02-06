@@ -112,7 +112,7 @@ The read counter (used to cycle through the 4 bytes of a register) increments wh
 
 ### Verification
 
-The design includes a comprehensive test suite with 33 tests covering:
+The design includes a comprehensive test suite with 34 tests covering:
 - Register load/read operations
 - All arithmetic operations (ADD, SUB, MUL, MAC)
 - Edge cases (overflow, underflow, P-1 values)
