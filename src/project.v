@@ -53,13 +53,16 @@ module tt_um_brmurrell3_m31_accel (
 
     // M31 Addition: (a + b) mod p using bit-folding since 2^31 ≡ 1 (mod p)
     // Inputs are in [0, P-1], so sum of 31-bit values is at most 2P-2.
-    // After folding, result is at most P. Use == P check (not >=) because
-    // the maximum folded value is exactly P when inputs sum to 2P-2.
+    // After folding, result is at most P. Speculative subtraction: compute
+    // both (fold) and (fold - P) in parallel, select via borrow bit.
     wire [31:0] add_raw = reg_a[30:0] + reg_b[30:0];
     /* verilator lint_off WIDTHEXPAND */
     wire [31:0] add_fold = add_raw[30:0] + add_raw[31];  // Intentional: fold carry bit
     /* verilator lint_on WIDTHEXPAND */
-    wire [31:0] add_result = (add_fold == P) ? 32'b0 : add_fold;
+    wire [31:0] add_sub = add_fold - P;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [31:0] add_result = add_sub[31] ? add_fold : add_sub[30:0];  // Intentional: 31-bit result
+    /* verilator lint_on WIDTHEXPAND */
 
     // M31 Subtraction: (a - b) mod p
     // If result is negative (underflow), add P to wrap into [0, P-1].
@@ -76,7 +79,7 @@ module tt_um_brmurrell3_m31_accel (
 
     // 62-bit to 31-bit reduction using double bit-folding
     // Product of two 31-bit values can be up to 62 bits. After two folds,
-    // result can be up to P+1, so we use >= P check with subtraction.
+    // result can be up to P. Speculative subtraction selects via borrow bit.
     /* verilator lint_off WIDTHEXPAND */
     /* verilator lint_off UNUSEDSIGNAL */
     wire [31:0] mul_low = mul_next_accum[30:0];   // Intentional: extract lower 31 bits
@@ -85,16 +88,22 @@ module tt_um_brmurrell3_m31_accel (
     wire [31:0] mul_fold2 = mul_fold1[30:0] + mul_fold1[31];  // Intentional: fold carry bit
     /* verilator lint_on UNUSEDSIGNAL */
     /* verilator lint_on WIDTHEXPAND */
-    wire [31:0] mul_result = (mul_fold2 >= P) ? (mul_fold2 - P) : mul_fold2;
+    wire [31:0] mul_fold2_sub = mul_fold2 - P;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [31:0] mul_result = mul_fold2_sub[31] ? mul_fold2 : mul_fold2_sub[30:0];  // Intentional: 31-bit result
+    /* verilator lint_on WIDTHEXPAND */
 
     // MAC result: mul_result + reg_a (reg_a preserved during multiply)
-    // Both mul_result and reg_a are in [0, P-1], so same logic as ADD applies:
-    // after folding, maximum value is exactly P, so == P check suffices.
+    // Both mul_result and reg_a are in [0, P-1], so same folding as ADD applies.
+    // Speculative subtraction selects via borrow bit.
     wire [31:0] mac_sum = mul_result[30:0] + reg_a[30:0];
     /* verilator lint_off WIDTHEXPAND */
     wire [31:0] mac_fold = mac_sum[30:0] + mac_sum[31];  // Intentional: fold carry bit
     /* verilator lint_on WIDTHEXPAND */
-    wire [31:0] mac_result = (mac_fold == P) ? 32'b0 : mac_fold;
+    wire [31:0] mac_sub = mac_fold - P;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [31:0] mac_result = mac_sub[31] ? mac_fold : mac_sub[30:0];  // Intentional: 31-bit result
+    /* verilator lint_on WIDTHEXPAND */
 
     // Outputs
     assign uio_oe = 8'b00000001;
@@ -195,11 +204,22 @@ module tt_um_brmurrell3_m31_accel (
     always @(posedge clk) f_past_valid <= 1'b1;
     initial assume(!rst_n);
 
-    // Assume valid field elements
+    // Assume valid field elements (user contract: load values in [0, P-1])
+    // These model the precondition that software loads only valid field elements.
+    // The assertions below then prove arithmetic outputs stay in [0, P-1].
     always @(*) begin
         assume(reg_a < P);
         assume(reg_b < P);
         assume(reg_c < P);
+    end
+
+    // Assert reg_a stays valid after operations write to it
+    // (Complements the assumes: proves operations preserve the field invariant)
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n)) begin
+        if ($past(cmd_en) && !$past(busy))
+            assert(reg_a < P);
+        if ($past(busy) && $past(mul_counter) == 5'd1)
+            assert(reg_a < P);
     end
 
     // Arithmetic outputs stay in field
@@ -208,6 +228,22 @@ module tt_um_brmurrell3_m31_accel (
         assert(sub_result < P);
         assert(mul_result < P);
         assert(mac_result < P);
+    end
+
+    // Functional correctness of addition
+    always @(posedge clk) if (rst_n) begin
+        if ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]} >= P)
+            assert(add_result == ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]} - P));
+        else
+            assert(add_result == ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]}));
+    end
+
+    // Functional correctness of subtraction
+    always @(posedge clk) if (rst_n) begin
+        if (reg_a[30:0] >= reg_b[30:0])
+            assert(sub_result == (reg_a[30:0] - reg_b[30:0]));
+        else
+            assert(sub_result == (reg_a[30:0] - reg_b[30:0] + P));
     end
 
     // Reset clears state

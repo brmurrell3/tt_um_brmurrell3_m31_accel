@@ -104,6 +104,12 @@ clock; result[31:24] = uo_out  # 0x00
 
 For MUL and MAC operations, poll the BUSY signal (uio_out[0]) and wait for it to go low before reading the result. These operations take 31 clock cycles.
 
+### Important: Read Counter Reset
+
+The read counter (used to cycle through the 4 bytes of a register) increments whenever RW=1 and CMD_EN=0, regardless of BUSY state. If you poll BUSY with RW=1, the read counter will advance and subsequent register reads will be misaligned.
+
+**Recommended pattern:** Issue a NOP (CMD_EN=1, opcode=0x0) for one cycle before starting a register read sequence. This resets the read counter to byte 0.
+
 ### Verification
 
 The design includes a comprehensive test suite with 33 tests covering:
