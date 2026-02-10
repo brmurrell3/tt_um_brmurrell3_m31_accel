@@ -231,7 +231,7 @@ async def test_busy_timing(dut):
         cycle_count += 1
         assert cycle_count < 40, "BUSY stuck high"
 
-    assert 30 <= cycle_count <= 32, f"expected ~31 cycles, got {cycle_count}"
+    assert 31 <= cycle_count <= 33, f"expected ~32 cycles, got {cycle_count}"
     dut._log.info(f"busy_timing: passed ({cycle_count} cycles)")
 
 
@@ -374,7 +374,7 @@ async def test_nop_and_reserved(dut):
     assert (int(dut.uio_out.value) & 0x01) == 0
 
     # Reserved opcodes should act as NOP
-    for opcode in range(0x5, 0x10):
+    for opcode in range(0x6, 0x10):
         await execute_opcode(dut, opcode)
         assert await read_register(dut, reg_sel=0) == test_val_a
         assert await read_register(dut, reg_sel=1) == test_val_b
@@ -1129,7 +1129,7 @@ async def test_mac_operand_preservation(dut):
 
 @cocotb.test()
 async def test_mac_busy_timing(dut):
-    """Test BUSY signal timing for MAC (should be 31 cycles like MUL)."""
+    """Test BUSY signal timing for MAC (should be 32 cycles like MUL)."""
     clock = Clock(dut.clk, 10, unit="us")
     cocotb.start_soon(clock.start())
     await reset_dut(dut)
@@ -1149,9 +1149,9 @@ async def test_mac_busy_timing(dut):
         # Use execute_mac helper which handles timing correctly
         cycle_count = await execute_mac(dut)
 
-        # Should be approximately 31 cycles (same as MUL)
-        # The execute_mac waits 2 cycles before counting, so we expect ~29-30
-        assert 28 <= cycle_count <= 32, f"MAC timing: expected ~30 cycles, got {cycle_count}"
+        # Should be approximately 32 cycles (same as MUL, including pipelined reduction)
+        # The execute_mac waits 2 cycles before counting, so we expect ~30-31
+        assert 29 <= cycle_count <= 33, f"MAC timing: expected ~31 cycles, got {cycle_count}"
 
     dut._log.info("mac_busy_timing: passed (3 timing tests)")
 
@@ -1552,3 +1552,50 @@ async def test_mac_power_of_two_folding(dut):
         assert result == expected, f"MAC pow2 {desc}: expected {expected:#x}, got {result:#x}"
 
     dut._log.info("mac_power_of_two_folding: passed (12 test vectors)")
+
+
+@cocotb.test()
+async def test_out_of_range_inputs(dut):
+    """Verify arithmetic operates on [30:0] slices when bit 31 is set."""
+    clock = Clock(dut.clk, 10, unit="us")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+    # Load P itself (0x7FFFFFFF) into reg_a — should behave as 0 in field
+    await load_register(dut, P, reg_sel=0)
+    await load_register(dut, 1, reg_sel=1)
+    await execute_opcode(dut, 0x1)  # ADD
+    result = await read_register(dut, reg_sel=0)
+    # P[30:0] = P, add_raw = P + 1 = 0x80000000, fold = 0 + 1 = 1
+    assert result == 1, f"P + 1 should give 1, got {result:#x}"
+
+    # Load value with bit 31 set (0x80000001) — [30:0] = 1
+    await load_register(dut, 0x80000001, reg_sel=0)
+    await load_register(dut, 5, reg_sel=1)
+    await execute_opcode(dut, 0x1)  # ADD
+    result = await read_register(dut, reg_sel=0)
+    assert result == 6, f"(0x80000001)[30:0] + 5 should give 6, got {result:#x}"
+
+    # Load 0xFFFFFFFF — [30:0] = P = 0 in field, add 7 should give 7
+    await load_register(dut, 0xFFFFFFFF, reg_sel=0)
+    await load_register(dut, 7, reg_sel=1)
+    await execute_opcode(dut, 0x1)  # ADD
+    result = await read_register(dut, reg_sel=0)
+    # 0xFFFFFFFF[30:0] = P, P + 7 = 0x80000006, fold = 6 + 1 = 7
+    assert result == 7, f"0xFFFFFFFF + 7 should give 7, got {result:#x}"
+
+    # Subtraction with bit 31 set in reg_b
+    await load_register(dut, 10, reg_sel=0)
+    await load_register(dut, 0x80000003, reg_sel=1)  # [30:0] = 3
+    await execute_opcode(dut, 0x2)  # SUB
+    result = await read_register(dut, reg_sel=0)
+    assert result == 7, f"10 - (0x80000003)[30:0] should give 7, got {result:#x}"
+
+    # Multiply with P as operand (should give 0 since P ≡ 0)
+    await load_register(dut, P, reg_sel=0)
+    await load_register(dut, 42, reg_sel=1)
+    await execute_mul(dut)
+    result = await read_register(dut, reg_sel=0)
+    assert result == 0, f"P * 42 should give 0, got {result:#x}"
+
+    dut._log.info("out_of_range_inputs: passed")

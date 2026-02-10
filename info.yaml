@@ -5,7 +5,7 @@ project:
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
   description:  "Hardware accelerator for modular arithmetic over the Mersenne-31 prime field"
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     50000000    # 50 MHz target
+  clock_hz:     66000000    # 66 MHz (TT board max)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "1x2"
