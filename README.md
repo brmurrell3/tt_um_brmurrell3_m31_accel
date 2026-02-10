@@ -25,7 +25,7 @@ See [docs/info.md](docs/info.md) for complete interface documentation.
 
 | Parameter | Value |
 |-----------|-------|
-| Target Clock | 50 MHz |
+| Target Clock | 66 MHz |
 | Tile Size | 1x2 |
 | Utilization | 58% |
 | Technology | IHP sg13g2 130nm |
