@@ -1,11 +1,31 @@
 /*
- * Copyright (c) 2024 Brendan Murrell
+ * Copyright (c) 2025 Brendan Murrell
  * SPDX-License-Identifier: Apache-2.0
  *
  * M31-ACCEL: Mersenne-31 Arithmetic Accelerator
  * Hardware accelerator for modular arithmetic over the Mersenne-31 prime field
  * (p = 2^31 - 1) for ZK-STARK / Plonky3 applications.
  */
+//
+// Interface Protocol
+// ==================
+// All communication uses an 8-bit data bus (ui_in) and 4 control bits (uio_in).
+//
+//   Control bits: [0]=CMD_EN  [1]=REG_SEL[0]  [2]=RW  [3]=REG_SEL[1]
+//   Register map: REG_SEL=00 -> A (accumulator)
+//                 REG_SEL=01 -> B (operand)
+//                 REG_SEL=10 -> C (MAC operand)
+//
+//   LOAD register: Set CMD_EN=0, RW=0, REG_SEL=target.
+//                  Drive 4 bytes on ui_in (LSB-first), one per clock cycle.
+//
+//   EXECUTE op:    Set CMD_EN=1, drive opcode on ui_in[3:0], hold 1 cycle.
+//                  For MUL/MAC, poll BUSY (uio_out[0]) until low before reading.
+//
+//   READ register: Set CMD_EN=0, RW=1, REG_SEL=target.
+//                  Read 4 bytes from uo_out (LSB-first), one per clock cycle.
+//                  Issue a NOP first to reset the read counter to byte 0.
+//
 
 `default_nettype none
 
@@ -52,25 +72,32 @@ module tt_um_brmurrell3_m31_accel (
 
     wire [3:0] opcode = ui_in[3:0];
 
+    // Bit-folding arithmetic intentionally mixes widths: 1-bit carries fold into
+    // 31-bit fields, and 62-bit products reduce to 31 bits. Speculative subtraction
+    // results are selected via the borrow (sign) bit. These width mismatches are
+    // fundamental to Mersenne prime reduction and are correct by construction.
+    // Formal verification (see `ifdef FORMAL block) proves all outputs stay in [0, P-1].
+    /* verilator lint_off WIDTHEXPAND */
+    /* verilator lint_off UNUSEDSIGNAL */
+
     // M31 Addition: (a + b) mod p using bit-folding since 2^31 ≡ 1 (mod p)
     // Inputs are in [0, P-1], so sum of 31-bit values is at most 2P-2.
     // After folding, result is at most P. Speculative subtraction: compute
     // both (fold) and (fold - P) in parallel, select via borrow bit.
     wire [31:0] add_raw = reg_a[30:0] + reg_b[30:0];
-    /* verilator lint_off WIDTHEXPAND */
     wire [31:0] add_fold = add_raw[30:0] + add_raw[31];  // Intentional: fold carry bit
-    /* verilator lint_on WIDTHEXPAND */
     wire [31:0] add_sub = add_fold - P;
-    /* verilator lint_off WIDTHEXPAND */
     wire [31:0] add_result = add_sub[31] ? add_fold : add_sub[30:0];  // Intentional: 31-bit result
-    /* verilator lint_on WIDTHEXPAND */
 
     // M31 Subtraction: (a - b) mod p
     // If result is negative (underflow), add P to wrap into [0, P-1].
+    // Speculative subtraction: when both inputs equal P (the representation
+    // of zero with bit 31 clear), sub_raw = 0 + P = P, which is not in
+    // [0, P-1]. Speculatively subtract P and select via borrow, same as ADD.
     wire signed [31:0] sub_signed = $signed({1'b0, reg_a[30:0]}) - $signed({1'b0, reg_b[30:0]});
-    /* verilator lint_off WIDTHEXPAND */
-    wire [31:0] sub_result = sub_signed[31] ? (sub_signed + P) : sub_signed[30:0];  // Intentional: 31-bit result
-    /* verilator lint_on WIDTHEXPAND */
+    wire [31:0] sub_raw  = sub_signed[31] ? (sub_signed + P) : sub_signed[30:0];
+    wire [31:0] sub_spec = sub_raw - P;
+    wire [31:0] sub_result = sub_spec[31] ? sub_raw : sub_spec[30:0];  // Intentional: 31-bit result
 
     // M31 Multiplication: shift-and-add, MSB-first
     // MUL: reg_a × reg_b, MAC: reg_b × reg_c
@@ -83,29 +110,22 @@ module tt_um_brmurrell3_m31_accel (
     // result can be up to P. Speculative subtraction selects via borrow bit.
     // Reads from mul_accum (registered) rather than mul_next_accum (combinational)
     // to pipeline the reduction — fires on the cycle after the inner loop completes.
-    /* verilator lint_off WIDTHEXPAND */
-    /* verilator lint_off UNUSEDSIGNAL */
     wire [31:0] mul_low = mul_accum[30:0];   // Intentional: extract lower 31 bits
     wire [31:0] mul_high = mul_accum[61:31]; // Intentional: extract upper 31 bits
     wire [32:0] mul_fold1 = mul_low + mul_high;   // mul_fold1[32] unused (folded via [31])
     wire [31:0] mul_fold2 = mul_fold1[30:0] + mul_fold1[31];  // Intentional: fold carry bit
-    /* verilator lint_on UNUSEDSIGNAL */
-    /* verilator lint_on WIDTHEXPAND */
     wire [31:0] mul_fold2_sub = mul_fold2 - P;
-    /* verilator lint_off WIDTHEXPAND */
     wire [31:0] mul_result = mul_fold2_sub[31] ? mul_fold2 : mul_fold2_sub[30:0];  // Intentional: 31-bit result
-    /* verilator lint_on WIDTHEXPAND */
 
     // MAC result: mul_result + reg_a (reg_a preserved during multiply)
     // Both mul_result and reg_a are in [0, P-1], so same folding as ADD applies.
     // Speculative subtraction selects via borrow bit.
     wire [31:0] mac_sum = mul_result[30:0] + reg_a[30:0];
-    /* verilator lint_off WIDTHEXPAND */
     wire [31:0] mac_fold = mac_sum[30:0] + mac_sum[31];  // Intentional: fold carry bit
-    /* verilator lint_on WIDTHEXPAND */
     wire [31:0] mac_sub = mac_fold - P;
-    /* verilator lint_off WIDTHEXPAND */
     wire [31:0] mac_result = mac_sub[31] ? mac_fold : mac_sub[30:0];  // Intentional: 31-bit result
+
+    /* verilator lint_on UNUSEDSIGNAL */
     /* verilator lint_on WIDTHEXPAND */
 
     // Outputs
@@ -209,81 +229,129 @@ module tt_um_brmurrell3_m31_accel (
     wire _unused = &{ena, uio_in[7:4], 1'b0};
 
 `ifdef FORMAL
+    // ================================================================
+    // Section 1: Setup
+    // ================================================================
     reg f_past_valid;
     initial f_past_valid = 1'b0;
     always @(posedge clk) f_past_valid <= 1'b1;
     initial assume(!rst_n);
 
-    // Assume valid field elements (user contract: load values in [0, P-1])
-    // These model the precondition that software loads only valid field elements.
-    // The assertions below then prove arithmetic outputs stay in [0, P-1].
+    // ================================================================
+    // Section 2: Input contract
+    // ================================================================
+    //
+    // Registers are loaded byte-serially over 4 clock cycles via the
+    // 8-bit data bus.  Constraining individual byte writes to guarantee
+    // field membership on the assembled 32-bit value would require
+    // cross-cycle assumptions that are fragile and hard to audit.
+    //
+    // Instead, we assume the assembled register values are valid field
+    // elements (< P).  This models the software contract: only valid
+    // field elements are loaded.
+    //
+    // After the speculative-subtraction fix to SUB, the field-membership
+    // assertions (Section 3) hold unconditionally — the assumes are NOT
+    // required for *_result < P.  They ARE required for functional
+    // correctness (Section 4), because the reference formulas assume
+    // single-wrap arithmetic (sum < 2P, difference > -P).
+    //
     always @(*) begin
         assume(reg_a < P);
         assume(reg_b < P);
         assume(reg_c < P);
     end
 
-    // Assert reg_a stays valid after operations write to it
-    // (Complements the assumes: proves operations preserve the field invariant)
+    // ================================================================
+    // Section 3: Field membership — every arithmetic output is in [0, P-1]
+    // ================================================================
+    always @(posedge clk) if (rst_n) begin
+        a_add_field: assert(add_result < P);
+        a_sub_field: assert(sub_result < P);
+        a_mul_field: assert(mul_result < P);
+        a_mac_field: assert(mac_result < P);
+    end
+
+    // reg_a remains a valid field element after any operation writes to it
     always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n)) begin
         if ($past(cmd_en) && !$past(busy))
-            assert(reg_a < P);
+            a_reg_a_cmd: assert(reg_a < P);
         if ($past(reducing))
-            assert(reg_a < P);
+            a_reg_a_reduce: assert(reg_a < P);
     end
 
-    // Arithmetic outputs stay in field
-    always @(posedge clk) if (rst_n) begin
-        assert(add_result < P);
-        assert(sub_result < P);
-        assert(mul_result < P);
-        assert(mac_result < P);
-    end
-
-    // Functional correctness of addition
+    // ================================================================
+    // Section 4: Functional correctness — ADD and SUB match reference spec
+    // ================================================================
     always @(posedge clk) if (rst_n) begin
         if ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]} >= P)
-            assert(add_result == ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]} - P));
+            a_add_hi: assert(add_result == ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]} - P));
         else
-            assert(add_result == ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]}));
+            a_add_lo: assert(add_result == ({1'b0, reg_a[30:0]} + {1'b0, reg_b[30:0]}));
     end
 
-    // Functional correctness of subtraction
     always @(posedge clk) if (rst_n) begin
         if (reg_a[30:0] >= reg_b[30:0])
-            assert(sub_result == (reg_a[30:0] - reg_b[30:0]));
+            a_sub_pos: assert(sub_result == (reg_a[30:0] - reg_b[30:0]));
         else
-            assert(sub_result == (reg_a[30:0] - reg_b[30:0] + P));
+            a_sub_neg: assert(sub_result == (reg_a[30:0] - reg_b[30:0] + P));
     end
 
-    // Reset clears state
+    // ================================================================
+    // Section 5: Reset — all state clears on reset
+    // ================================================================
     always @(posedge clk) if (f_past_valid && !$past(rst_n)) begin
-        assert(reg_a == 0);
-        assert(reg_b == 0);
-        assert(reg_c == 0);
-        assert(mul_counter == 0);
-        assert(read_counter == 0);
-        assert(reducing == 0);
+        a_rst_reg_a:    assert(reg_a == 0);
+        a_rst_reg_b:    assert(reg_b == 0);
+        a_rst_reg_c:    assert(reg_c == 0);
+        a_rst_counter:  assert(mul_counter == 0);
+        a_rst_read_ctr: assert(read_counter == 0);
+        a_rst_reducing: assert(reducing == 0);
     end
 
-    // BUSY signal
-    always @(*) assert(busy == (mul_counter != 0 || reducing));
-    always @(*) assert(mul_counter <= 31);
+    // ================================================================
+    // Section 6: Control logic
+    // ================================================================
+    // BUSY is the OR of active multiply and pending reduction
+    always @(*) a_busy_def: assert(busy == (mul_counter != 0 || reducing));
 
-    // Reducing invariants
-    always @(*) if (reducing) assert(mul_counter == 0);
+    // Counter never exceeds 31
+    always @(*) a_counter_max: assert(mul_counter <= 31);
+
+    // Reduction takes exactly one cycle
+    always @(*) if (reducing) a_reduce_one_cycle: assert(mul_counter == 0);
     always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n))
-        assert(!($past(reducing) && reducing));  // At most one cycle
+        a_reduce_no_stall: assert(!($past(reducing) && reducing));
 
-    // Operands stable during multiply
+    // Operands (reg_b, reg_c) are stable while multiply is in progress
     always @(posedge clk) if (f_past_valid && $past(rst_n) && rst_n && $past(busy) && busy) begin
-        assert($stable(reg_b));
-        assert($stable(reg_c));
+        a_reg_b_stable: assert($stable(reg_b));
+        a_reg_c_stable: assert($stable(reg_c));
     end
 
-    // Counter decrements each cycle (only when counter was nonzero, not during reducing)
+    // Counter decrements each active cycle
     always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n) && $past(mul_counter != 0))
-        assert(mul_counter == $past(mul_counter) - 1);
+        a_counter_dec: assert(mul_counter == $past(mul_counter) - 1);
+
+    // ================================================================
+    // Section 7: Reachability (cover)
+    // ================================================================
+    // Can complete a multiply and produce a non-zero result
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n))
+        c_mul_nonzero: cover($past(reducing) && !reducing && reg_a != 0);
+
+    // Can reach maximum field element P-1
+    always @(posedge clk) if (f_past_valid && rst_n)
+        c_max_element: cover(reg_a == (P - 1));
+
+    // Can produce zero via addition (additive inverse)
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n))
+        if ($past(cmd_en) && $past(opcode == OP_ADD) && !$past(busy))
+            c_add_inverse: cover(reg_a == 0 && $past(reg_a) != 0);
+
+    // Can complete a MAC operation
+    always @(posedge clk) if (f_past_valid && rst_n && $past(rst_n))
+        c_mac_complete: cover($past(reducing) && !reducing && $past(mac_mode));
 `endif
 
 endmodule

@@ -44,3 +44,6 @@ src/config_merged.json
 
 # Personal notes
 .notes/
+
+# Build artifacts
+a.out

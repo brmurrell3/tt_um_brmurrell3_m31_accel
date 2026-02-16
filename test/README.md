@@ -1,47 +1,46 @@
-# Sample testbench for a Tiny Tapeout project
+# M31-ACCEL Test Suite
 
-This is a sample testbench for a Tiny Tapeout project. It uses [cocotb](https://docs.cocotb.org/en/stable/) to drive the DUT and check the outputs.
-See below to get started or for more information, check the [website](https://tinytapeout.com/hdl/testing/).
+Cocotb testbench for the Mersenne-31 arithmetic accelerator. Covers all operations (ADD, SUB, MUL, MAC, CLR, NOP), edge cases, timing, and mathematical properties.
 
-## Setting up
+## Test Summary
 
-1. Edit [Makefile](Makefile) and modify `PROJECT_SOURCES` to point to your Verilog files.
-2. Edit [tb.v](tb.v) and replace `tt_um_example` with your module name.
+| Category | Tests | Vectors |
+|----------|-------|---------|
+| Register load/read | 2 | 4 |
+| Arithmetic (ADD, SUB, MUL) | 4 | 17 |
+| Boundary cases | 3 | 43 |
+| Timing and control | 4 | - |
+| Random + edge grid | 1 | 663 |
+| Mathematical identities | 1 | 4 |
+| MAC operation | 12 | 400+ |
+| Out-of-range inputs | 1 | 5 |
+| **Total** | **34** | **1000+** |
 
-## How to run
-
-To run the RTL simulation:
+## Running Tests
 
 ```sh
 make -B
 ```
 
-To run gatelevel simulation, first harden your project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`.
-
-Then run:
+Gate-level simulation (requires hardened netlist):
 
 ```sh
 make -B GATES=yes
 ```
 
-If you wish to save the waveform in VCD format instead of FST format, edit tb.v to use `$dumpfile("tb.vcd");` and then run:
+## Viewing Waveforms
 
 ```sh
-make -B FST=
+gtkwave tb.fst tb.gtkw    # GTKWave
+surfer tb.fst              # Surfer
 ```
 
-This will generate `tb.vcd` instead of `tb.fst`.
+## Test Architecture
 
-## How to view the waveform file
+Tests use helper functions for the byte-serial interface protocol:
 
-Using GTKWave
-
-```sh
-gtkwave tb.fst tb.gtkw
-```
-
-Using Surfer
-
-```sh
-surfer tb.fst
-```
+- `init_dut(dut)` - Start clock and reset
+- `load_register(dut, value, reg_sel)` - 4-byte serial write
+- `read_register(dut, reg_sel)` - 4-byte serial read
+- `execute_opcode(dut, opcode)` - Single-cycle operation
+- `execute_mul(dut)` / `execute_mac(dut)` - Multi-cycle with BUSY polling

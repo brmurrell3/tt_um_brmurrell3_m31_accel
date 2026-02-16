@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2024 Tiny Tapeout
+# SPDX-FileCopyrightText: © 2025 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
 import cocotb
@@ -6,20 +6,45 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 import random
 
+# Control signal encoding for uio_in
+# Bits: [3]=REG_SEL[1], [2]=RW, [1]=REG_SEL[0], [0]=CMD_EN
+UIO_CMD_EN   = 0b0001  # CMD_EN=1: execute opcode
+UIO_RW_READ  = 0b0100  # RW=1: read mode (also stops loading)
+UIO_REG_A    = 0b0000  # REG_SEL=00: select reg_a
+UIO_REG_B    = 0b0010  # REG_SEL=01: select reg_b
+UIO_REG_C    = 0b1000  # REG_SEL=10: select reg_c
+
+# Opcodes (match Verilog OP_* parameters)
+OP_NOP = 0x0
+OP_ADD = 0x1
+OP_SUB = 0x2
+OP_MUL = 0x3
+OP_CLR = 0x4
+OP_MAC = 0x5
+
 P = 2**31 - 1  # Mersenne-31 prime
 
 
 async def reset_dut(dut):
+    """Assert reset for 5 cycles, release, then wait 2 cycles for stabilization."""
     dut.ena.value = 1
     dut.ui_in.value = 0
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 2)
 
 
+async def init_dut(dut):
+    """Start clock and reset the DUT. Call at the beginning of every test."""
+    clock = Clock(dut.clk, 10, unit="us")
+    cocotb.start_soon(clock.start())
+    await reset_dut(dut)
+
+
 async def load_register(dut, value, reg_sel):
+    """Load a 32-bit value into the selected register via 4 byte-serial writes (LSB-first)."""
     # reg_sel encoding: uio_in[3]=REG_SEL[1], uio_in[1]=REG_SEL[0], uio_in[2]=RW, uio_in[0]=CMD_EN
     # For write: RW=0, CMD_EN=0
     # reg_sel=0: uio_in = 0b0000 (reg_a)
@@ -32,11 +57,12 @@ async def load_register(dut, value, reg_sel):
         byte_val = (value >> (i * 8)) & 0xFF
         dut.ui_in.value = byte_val
         await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100  # RW=1 to stop loading
+    dut.uio_in.value = UIO_RW_READ  # RW=1 to stop loading
     dut.ui_in.value = 0
 
 
 async def read_register(dut, reg_sel):
+    """Read a 32-bit value from the selected register via 4 byte-serial reads (LSB-first)."""
     # reg_sel encoding: uio_in[3]=REG_SEL[1], uio_in[1]=REG_SEL[0], uio_in[2]=RW, uio_in[0]=CMD_EN
     # For read: RW=1 (bit 2), CMD_EN=0 (bit 0)
     # reg_sel=0: uio_in = 0b0100 (reg_a)
@@ -53,15 +79,17 @@ async def read_register(dut, reg_sel):
 
 
 async def execute_opcode(dut, opcode):
-    dut.uio_in.value = 0b001
+    """Execute a single-cycle opcode (ADD, SUB, CLR, NOP)."""
+    dut.uio_in.value = UIO_CMD_EN
     dut.ui_in.value = opcode
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
 
 
 async def execute_mul(dut):
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x3
+    """Execute MUL opcode and poll BUSY until completion. Returns cycle count."""
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MUL
     await ClockCycles(dut.clk, 2)
     dut.ui_in.value = 0x0
     cycle_count = 0
@@ -69,22 +97,20 @@ async def execute_mul(dut):
         await ClockCycles(dut.clk, 1)
         cycle_count += 1
         assert cycle_count < 40, "BUSY stuck high"
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     return cycle_count
 
 
 @cocotb.test()
 async def test_register_load(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
-    dut.uio_in.value = 0b000
+    dut.uio_in.value = UIO_REG_A
     for byte_val in [0x78, 0x56, 0x34, 0x12]:
         dut.ui_in.value = byte_val
         await ClockCycles(dut.clk, 1)
 
-    dut.uio_in.value = 0b010
+    dut.uio_in.value = UIO_REG_B
     for byte_val in [0xEF, 0xBE, 0xAD, 0xDE]:
         dut.ui_in.value = byte_val
         await ClockCycles(dut.clk, 1)
@@ -94,9 +120,7 @@ async def test_register_load(dut):
 
 @cocotb.test()
 async def test_register_read(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_val_a = 0xDEADBEEF
     await load_register(dut, test_val_a, reg_sel=0)
@@ -113,9 +137,7 @@ async def test_register_read(dut):
 
 @cocotb.test()
 async def test_add(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         (0, 0, 0),
@@ -128,7 +150,7 @@ async def test_add(dut):
     for a, b, expected in test_cases:
         await load_register(dut, a, reg_sel=0)
         await load_register(dut, b, reg_sel=1)
-        await execute_opcode(dut, 0x1)
+        await execute_opcode(dut, OP_ADD)
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"add({a:#x}, {b:#x}): expected {expected:#x}, got {result:#x}"
 
@@ -137,9 +159,7 @@ async def test_add(dut):
 
 @cocotb.test()
 async def test_sub(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         (5, 3, 2),
@@ -152,7 +172,7 @@ async def test_sub(dut):
     for a, b, expected in test_cases:
         await load_register(dut, a, reg_sel=0)
         await load_register(dut, b, reg_sel=1)
-        await execute_opcode(dut, 0x2)
+        await execute_opcode(dut, OP_SUB)
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"sub({a:#x}, {b:#x}): expected {expected:#x}, got {result:#x}"
 
@@ -161,9 +181,7 @@ async def test_sub(dut):
 
 @cocotb.test()
 async def test_clr(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     await load_register(dut, 0xDEADBEEF, reg_sel=0)
     await load_register(dut, 0x12345678, reg_sel=1)
@@ -173,7 +191,7 @@ async def test_clr(dut):
     assert result_a == 0xDEADBEEF
     assert result_b == 0x12345678
 
-    await execute_opcode(dut, 0x4)
+    await execute_opcode(dut, OP_CLR)
 
     result_a = await read_register(dut, reg_sel=0)
     result_b = await read_register(dut, reg_sel=1)
@@ -185,9 +203,7 @@ async def test_clr(dut):
 
 @cocotb.test()
 async def test_mul(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         (0, 12345, 0),
@@ -211,15 +227,13 @@ async def test_mul(dut):
 
 @cocotb.test()
 async def test_busy_timing(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     await load_register(dut, 100, reg_sel=0)
     await load_register(dut, 200, reg_sel=1)
 
-    dut.uio_in.value = 0x01
-    dut.ui_in.value = 0x3
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MUL
     await ClockCycles(dut.clk, 2)
 
     busy = int(dut.uio_out.value) & 0x01
@@ -237,9 +251,7 @@ async def test_busy_timing(dut):
 
 @cocotb.test()
 async def test_random_values(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     edge_cases = [0, 1, 2, P-1, P-2, 1<<15, 1<<20, 1<<25, 1<<30, (1<<16)-1, (1<<24)-1]
 
@@ -249,7 +261,7 @@ async def test_random_values(dut):
         a, b = random.randint(0, P-1), random.randint(0, P-1)
         await load_register(dut, a, reg_sel=0)
         await load_register(dut, b, reg_sel=1)
-        await execute_opcode(dut, 0x1)
+        await execute_opcode(dut, OP_ADD)
         result = await read_register(dut, reg_sel=0)
         assert result == (a + b) % P
 
@@ -258,7 +270,7 @@ async def test_random_values(dut):
         for b in edge_cases:
             await load_register(dut, a, reg_sel=0)
             await load_register(dut, b, reg_sel=1)
-            await execute_opcode(dut, 0x1)
+            await execute_opcode(dut, OP_ADD)
             result = await read_register(dut, reg_sel=0)
             assert result == (a + b) % P
 
@@ -268,7 +280,7 @@ async def test_random_values(dut):
         a, b = random.randint(0, P-1), random.randint(0, P-1)
         await load_register(dut, a, reg_sel=0)
         await load_register(dut, b, reg_sel=1)
-        await execute_opcode(dut, 0x2)
+        await execute_opcode(dut, OP_SUB)
         result = await read_register(dut, reg_sel=0)
         assert result == (a - b) % P
 
@@ -277,7 +289,7 @@ async def test_random_values(dut):
         for b in edge_cases:
             await load_register(dut, a, reg_sel=0)
             await load_register(dut, b, reg_sel=1)
-            await execute_opcode(dut, 0x2)
+            await execute_opcode(dut, OP_SUB)
             result = await read_register(dut, reg_sel=0)
             assert result == (a - b) % P
 
@@ -300,19 +312,19 @@ async def test_random_values(dut):
             result = await read_register(dut, reg_sel=0)
             assert result == (a * b) % P
 
-    dut._log.info("random_values: passed (663 cases)")
+    n_random = 100 * 3
+    n_edge = len(edge_cases) ** 2 * 3
+    dut._log.info(f"random_values: passed ({n_random + n_edge} cases)")
 
 
 @cocotb.test()
 async def test_chained_ops(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # Chain: 5+3=8, 8*2=16, 16-1=15
     await load_register(dut, 5, reg_sel=0)
     await load_register(dut, 3, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     assert await read_register(dut, reg_sel=0) == 8
 
     await load_register(dut, 2, reg_sel=1)
@@ -320,34 +332,34 @@ async def test_chained_ops(dut):
     assert await read_register(dut, reg_sel=0) == 16
 
     await load_register(dut, 1, reg_sel=1)
-    await execute_opcode(dut, 0x2)
+    await execute_opcode(dut, OP_SUB)
     assert await read_register(dut, reg_sel=0) == 15
 
     # Chain ADDs: 10+5+5+5=25
-    await execute_opcode(dut, 0x4)
+    await execute_opcode(dut, OP_CLR)
     await load_register(dut, 10, reg_sel=0)
     await load_register(dut, 5, reg_sel=1)
-    await execute_opcode(dut, 0x1)
-    await execute_opcode(dut, 0x1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
+    await execute_opcode(dut, OP_ADD)
+    await execute_opcode(dut, OP_ADD)
     assert await read_register(dut, reg_sel=0) == 25
 
     # ((12+8)*3)-5 = 55
-    await execute_opcode(dut, 0x4)
+    await execute_opcode(dut, OP_CLR)
     await load_register(dut, 12, reg_sel=0)
     await load_register(dut, 8, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     await load_register(dut, 3, reg_sel=1)
     await execute_mul(dut)
     await load_register(dut, 5, reg_sel=1)
-    await execute_opcode(dut, 0x2)
+    await execute_opcode(dut, OP_SUB)
     assert await read_register(dut, reg_sel=0) == 55
 
     # Overflow: (P-1)+(P-1)=P-2, then *2
-    await execute_opcode(dut, 0x4)
+    await execute_opcode(dut, OP_CLR)
     await load_register(dut, P-1, reg_sel=0)
     await load_register(dut, P-1, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     assert await read_register(dut, reg_sel=0) == P-2
     await load_register(dut, 2, reg_sel=1)
     await execute_mul(dut)
@@ -358,9 +370,7 @@ async def test_chained_ops(dut):
 
 @cocotb.test()
 async def test_nop_and_reserved(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_val_a = 0x12345678
     test_val_b = 0x5EADBEEF
@@ -368,7 +378,7 @@ async def test_nop_and_reserved(dut):
     await load_register(dut, test_val_b, reg_sel=1)
 
     # NOP should not change registers
-    await execute_opcode(dut, 0x0)
+    await execute_opcode(dut, OP_NOP)
     assert await read_register(dut, reg_sel=0) == test_val_a
     assert await read_register(dut, reg_sel=1) == test_val_b
     assert (int(dut.uio_out.value) & 0x01) == 0
@@ -381,7 +391,7 @@ async def test_nop_and_reserved(dut):
 
     # Operations still work after NOPs
     expected = (test_val_a + test_val_b) % P
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     assert await read_register(dut, reg_sel=0) == expected
 
     dut._log.info("nop_and_reserved: passed")
@@ -389,9 +399,7 @@ async def test_nop_and_reserved(dut):
 
 @cocotb.test()
 async def test_busy_protection(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_a, test_b = 100, 200
     expected = (test_a * test_b) % P
@@ -400,33 +408,33 @@ async def test_busy_protection(dut):
     await load_register(dut, test_b, reg_sel=1)
 
     # Start MUL
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x3
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MUL
     await ClockCycles(dut.clk, 2)
     assert (int(dut.uio_out.value) & 0x01) == 1
 
     # Try ADD during BUSY (should be ignored)
     await ClockCycles(dut.clk, 5)
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x1
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_ADD
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     assert (int(dut.uio_out.value) & 0x01) == 1
 
     # Try CLR during BUSY (should be ignored)
     await ClockCycles(dut.clk, 5)
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x4
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_CLR
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     assert (int(dut.uio_out.value) & 0x01) == 1
 
     # Try register load during BUSY (should be ignored)
     await ClockCycles(dut.clk, 5)
-    dut.uio_in.value = 0b000
+    dut.uio_in.value = UIO_REG_A
     dut.ui_in.value = 0xFF
     await ClockCycles(dut.clk, 4)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
 
     # Wait for completion
     cycle_count = 0
@@ -436,10 +444,10 @@ async def test_busy_protection(dut):
         assert cycle_count < 40
 
     # Reset read counter and verify result
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x0
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_NOP
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
 
     result_a = await read_register(dut, reg_sel=0)
     result_b = await read_register(dut, reg_sel=1)
@@ -449,7 +457,7 @@ async def test_busy_protection(dut):
     # Verify normal operation after BUSY clears
     await load_register(dut, 1000, reg_sel=0)
     await load_register(dut, 2000, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     assert await read_register(dut, reg_sel=0) == 3000
 
     dut._log.info("busy_protection: passed")
@@ -458,9 +466,7 @@ async def test_busy_protection(dut):
 @cocotb.test()
 async def test_mul_boundary_cases(dut):
     """Test multiplication edge cases: power-of-two folding, max products."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # Zero cases
@@ -505,15 +511,13 @@ async def test_mul_boundary_cases(dut):
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"mul {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("mul_boundary_cases: passed (17 cases)")
+    dut._log.info(f"mul_boundary_cases: passed ({len(test_cases)} cases)")
 
 
 @cocotb.test()
 async def test_add_boundary_cases(dut):
     """Test addition edge cases: carry folding, P→0 normalization."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # Identity
@@ -545,19 +549,17 @@ async def test_add_boundary_cases(dut):
     for a, b, expected, desc in test_cases:
         await load_register(dut, a, reg_sel=0)
         await load_register(dut, b, reg_sel=1)
-        await execute_opcode(dut, 0x1)
+        await execute_opcode(dut, OP_ADD)
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"add {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("add_boundary_cases: passed (13 cases)")
+    dut._log.info(f"add_boundary_cases: passed ({len(test_cases)} cases)")
 
 
 @cocotb.test()
 async def test_sub_boundary_cases(dut):
     """Test subtraction edge cases: underflow wrap-around."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # Identity
@@ -587,32 +589,30 @@ async def test_sub_boundary_cases(dut):
     for a, b, expected, desc in test_cases:
         await load_register(dut, a, reg_sel=0)
         await load_register(dut, b, reg_sel=1)
-        await execute_opcode(dut, 0x2)
+        await execute_opcode(dut, OP_SUB)
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"sub {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("sub_boundary_cases: passed (13 cases)")
+    dut._log.info(f"sub_boundary_cases: passed ({len(test_cases)} cases)")
 
 
 @cocotb.test()
 async def test_reg_preservation(dut):
     """Verify reg_b is preserved after ADD, SUB, and MUL operations."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_b = 0x12345678
 
     # Test ADD preserves reg_b
     await load_register(dut, 100, reg_sel=0)
     await load_register(dut, test_b, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     result_b = await read_register(dut, reg_sel=1)
     assert result_b == test_b, f"ADD corrupted reg_b: expected {test_b:#x}, got {result_b:#x}"
 
     # Test SUB preserves reg_b
     await load_register(dut, 200, reg_sel=0)
-    await execute_opcode(dut, 0x2)
+    await execute_opcode(dut, OP_SUB)
     result_b = await read_register(dut, reg_sel=1)
     assert result_b == test_b, f"SUB corrupted reg_b: expected {test_b:#x}, got {result_b:#x}"
 
@@ -624,9 +624,9 @@ async def test_reg_preservation(dut):
 
     # Test multiple chained operations preserve reg_b
     await load_register(dut, 50, reg_sel=0)
-    await execute_opcode(dut, 0x1)
-    await execute_opcode(dut, 0x1)
-    await execute_opcode(dut, 0x2)
+    await execute_opcode(dut, OP_ADD)
+    await execute_opcode(dut, OP_ADD)
+    await execute_opcode(dut, OP_SUB)
     await execute_mul(dut)
     result_b = await read_register(dut, reg_sel=1)
     assert result_b == test_b, f"Chained ops corrupted reg_b"
@@ -637,9 +637,7 @@ async def test_reg_preservation(dut):
 @cocotb.test()
 async def test_back_to_back_mul(dut):
     """Test sequential multiplication operations."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # First MUL: 5 * 7 = 35
     await load_register(dut, 5, reg_sel=0)
@@ -679,15 +677,13 @@ async def test_back_to_back_mul(dut):
 @cocotb.test()
 async def test_read_counter_wrap(dut):
     """Test read counter wraps correctly after 4+ consecutive reads."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_val = 0x04030201
     await load_register(dut, test_val, reg_sel=0)
 
     # Read 8 consecutive bytes (should wrap after 4)
-    dut.uio_in.value = 0b100  # RW=1, REG_SEL=0
+    dut.uio_in.value = UIO_RW_READ  # RW=1, REG_SEL=0
     expected_bytes = [0x01, 0x02, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04]
 
     for i, expected in enumerate(expected_bytes):
@@ -701,16 +697,14 @@ async def test_read_counter_wrap(dut):
 @cocotb.test()
 async def test_reset_during_mul(dut):
     """Test reset during multiplication clears state properly."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # Load values and start MUL
     await load_register(dut, 12345, reg_sel=0)
     await load_register(dut, 67890, reg_sel=1)
 
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x3
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MUL
     await ClockCycles(dut.clk, 2)
 
     # Verify MUL is in progress
@@ -721,7 +715,7 @@ async def test_reset_during_mul(dut):
     assert (int(dut.uio_out.value) & 0x01) == 1, "BUSY should still be high"
 
     # Assert reset - also clear control signals to avoid re-triggering MUL
-    dut.uio_in.value = 0b100  # Clear CMD_EN before reset to avoid re-trigger
+    dut.uio_in.value = UIO_RW_READ  # Clear CMD_EN before reset to avoid re-trigger
     dut.ui_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
@@ -743,7 +737,7 @@ async def test_reset_during_mul(dut):
     # Normal operation should work after reset
     await load_register(dut, 100, reg_sel=0)
     await load_register(dut, 200, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     result = await read_register(dut, reg_sel=0)
     assert result == 300, f"post-reset operation failed: expected 300, got {result}"
 
@@ -751,9 +745,9 @@ async def test_reset_during_mul(dut):
 
 
 async def execute_mac(dut):
-    """Execute MAC operation and wait for completion."""
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x5  # MAC opcode
+    """Execute MAC opcode and poll BUSY until completion. Returns cycle count."""
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MAC
     await ClockCycles(dut.clk, 2)
     dut.ui_in.value = 0x0
     cycle_count = 0
@@ -761,27 +755,25 @@ async def execute_mac(dut):
         await ClockCycles(dut.clk, 1)
         cycle_count += 1
         assert cycle_count < 40, "BUSY stuck high during MAC"
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     return cycle_count
 
 
 @cocotb.test()
 async def test_mathematical_identities(dut):
     """Verify mathematical field properties hold."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # Commutativity of addition: a + b = b + a
     a, b = 0x12345678, 0x23456789
     await load_register(dut, a, reg_sel=0)
     await load_register(dut, b, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     result1 = await read_register(dut, reg_sel=0)
 
     await load_register(dut, b, reg_sel=0)
     await load_register(dut, a, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     result2 = await read_register(dut, reg_sel=0)
     assert result1 == result2, f"add commutativity failed: {result1:#x} != {result2:#x}"
 
@@ -803,7 +795,7 @@ async def test_mathematical_identities(dut):
     # Calculate a * (b + c)
     await load_register(dut, b, reg_sel=0)
     await load_register(dut, c, reg_sel=1)
-    await execute_opcode(dut, 0x1)  # b + c
+    await execute_opcode(dut, OP_ADD)  # b + c
     await load_register(dut, a, reg_sel=1)
     # Swap: need a in reg_a, (b+c) in reg_b
     sum_bc = await read_register(dut, reg_sel=0)
@@ -825,7 +817,7 @@ async def test_mathematical_identities(dut):
 
     await load_register(dut, ab, reg_sel=0)
     await load_register(dut, ac, reg_sel=1)
-    await execute_opcode(dut, 0x1)
+    await execute_opcode(dut, OP_ADD)
     result_rhs = await read_register(dut, reg_sel=0)
 
     assert result_lhs == result_rhs, f"distributive failed: {result_lhs} != {result_rhs}"
@@ -850,9 +842,7 @@ async def test_mathematical_identities(dut):
 @cocotb.test()
 async def test_mac_basic(dut):
     """Test basic MAC: 0 + (a × b) = a × b when reg_a starts at 0."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # (reg_a, reg_b, reg_c, expected_result, description)
@@ -874,15 +864,13 @@ async def test_mac_basic(dut):
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"MAC {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("mac_basic: passed (8 test vectors)")
+    dut._log.info(f"mac_basic: passed ({len(test_cases)} test vectors)")
 
 
 @cocotb.test()
 async def test_mac_accumulation(dut):
     """Test MAC with non-zero reg_a: accumulation behavior."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # (reg_a, reg_b, reg_c, expected = reg_a + reg_b*reg_c mod P)
@@ -906,15 +894,13 @@ async def test_mac_accumulation(dut):
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"MAC accum {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("mac_accumulation: passed (10 test vectors)")
+    dut._log.info(f"mac_accumulation: passed ({len(test_cases)} test vectors)")
 
 
 @cocotb.test()
 async def test_mac_identity_cases(dut):
     """Test MAC identity cases: a + (1 × b) = a + b, a + (0 × b) = a."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_values = [0, 1, 2, 100, 12345, 0x12345678, P-1, P-2, 0x40000000]
 
@@ -955,15 +941,14 @@ async def test_mac_identity_cases(dut):
             result = await read_register(dut, reg_sel=0)
             assert result == expected, f"a + b*0: a={a}, b={b}: expected {expected}, got {result}"
 
-    dut._log.info("mac_identity_cases: passed (79 test vectors)")
+    n = 5 * 5 + len(test_values) * 3 * 2
+    dut._log.info(f"mac_identity_cases: passed ({n} test vectors)")
 
 
 @cocotb.test()
 async def test_mac_dot_product(dut):
     """Test chained MAC for dot product: Σ(ai × bi) using 4+ terms."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # Dot product test case 1: Simple integers
     # [1, 2, 3, 4] · [5, 6, 7, 8] = 1*5 + 2*6 + 3*7 + 4*8 = 5 + 12 + 21 + 32 = 70
@@ -1034,9 +1019,7 @@ async def test_mac_dot_product(dut):
 @cocotb.test()
 async def test_mac_overflow_handling(dut):
     """Test MAC overflow handling: values near P-1 that wrap around."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # Cases where product overflows 31 bits
@@ -1073,15 +1056,13 @@ async def test_mac_overflow_handling(dut):
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"MAC overflow {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("mac_overflow_handling: passed (13 test vectors)")
+    dut._log.info(f"mac_overflow_handling: passed ({len(test_cases)} test vectors)")
 
 
 @cocotb.test()
 async def test_mac_operand_preservation(dut):
     """Verify reg_b and reg_c are unchanged after MAC operation."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_configs = [
         (0, 0x12345678, 0x5EADBEEF),
@@ -1130,9 +1111,7 @@ async def test_mac_operand_preservation(dut):
 @cocotb.test()
 async def test_mac_busy_timing(dut):
     """Test BUSY signal timing for MAC (should be 32 cycles like MUL)."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # Test with non-zero values to ensure timing is consistent
     test_values = [
@@ -1159,9 +1138,7 @@ async def test_mac_busy_timing(dut):
 @cocotb.test()
 async def test_mac_edge_cases(dut):
     """Test MAC edge cases: P-1 values, zero multiplication, maximum accumulation."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_cases = [
         # P-1 as reg_a (represents -1 mod P)
@@ -1216,15 +1193,13 @@ async def test_mac_edge_cases(dut):
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"MAC edge {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("mac_edge_cases: passed (25 test vectors)")
+    dut._log.info(f"mac_edge_cases: passed ({len(test_cases)} test vectors)")
 
 
 @cocotb.test()
 async def test_mac_vs_mul_add(dut):
     """Verify MAC produces same result as separate MUL then ADD."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     random.seed(123)
     test_cases = []
@@ -1266,22 +1241,20 @@ async def test_mac_vs_mul_add(dut):
         # Then add reg_a to the product
         await load_register(dut, reg_a, reg_sel=0)
         await load_register(dut, product, reg_sel=1)
-        await execute_opcode(dut, 0x1)  # ADD
+        await execute_opcode(dut, OP_ADD)
         mul_add_result = await read_register(dut, reg_sel=0)
 
         assert mac_result == mul_add_result, \
             f"MAC != MUL+ADD: a={reg_a:#x}, b={reg_b:#x}, c={reg_c:#x}: " \
             f"MAC={mac_result:#x}, MUL+ADD={mul_add_result:#x}"
 
-    dut._log.info("mac_vs_mul_add: passed (28 comparison tests)")
+    dut._log.info(f"mac_vs_mul_add: passed ({len(test_cases)} comparison tests)")
 
 
 @cocotb.test()
 async def test_mac_random_values(dut):
     """Test MAC with random values across the valid range."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     random.seed(456)
 
@@ -1324,9 +1297,7 @@ async def test_mac_random_values(dut):
 @cocotb.test()
 async def test_mac_reg_c_load_and_read(dut):
     """Test loading and reading reg_c independently."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_values = [
         0x00000000,
@@ -1375,9 +1346,7 @@ async def test_mac_reg_c_load_and_read(dut):
 @cocotb.test()
 async def test_mac_busy_protection(dut):
     """Test that operations during MAC BUSY are ignored."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     test_a, test_b, test_c = 100, 200, 300
     expected = (test_a + (test_b * test_c) % P) % P
@@ -1387,41 +1356,41 @@ async def test_mac_busy_protection(dut):
     await load_register(dut, test_c, reg_sel=2)
 
     # Start MAC
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x5  # MAC opcode
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MAC
     await ClockCycles(dut.clk, 2)
     assert (int(dut.uio_out.value) & 0x01) == 1, "BUSY should be high"
 
     # Try ADD during BUSY (should be ignored)
     await ClockCycles(dut.clk, 5)
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x1  # ADD opcode
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_ADD
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     assert (int(dut.uio_out.value) & 0x01) == 1
 
     # Try CLR during BUSY (should be ignored)
     await ClockCycles(dut.clk, 5)
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x4  # CLR opcode
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_CLR
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     assert (int(dut.uio_out.value) & 0x01) == 1
 
     # Try another MAC during BUSY (should be ignored)
     await ClockCycles(dut.clk, 3)
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x5  # MAC opcode
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_MAC
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
     assert (int(dut.uio_out.value) & 0x01) == 1
 
     # Try register load during BUSY (should be ignored)
     await ClockCycles(dut.clk, 3)
-    dut.uio_in.value = 0b000  # Load reg_a
+    dut.uio_in.value = UIO_REG_A  # Load reg_a
     dut.ui_in.value = 0xFF
     await ClockCycles(dut.clk, 4)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
 
     # Wait for completion
     cycle_count = 0
@@ -1431,10 +1400,10 @@ async def test_mac_busy_protection(dut):
         assert cycle_count < 40
 
     # Reset read counter
-    dut.uio_in.value = 0b001
-    dut.ui_in.value = 0x0  # NOP
+    dut.uio_in.value = UIO_CMD_EN
+    dut.ui_in.value = OP_NOP
     await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0b100
+    dut.uio_in.value = UIO_RW_READ
 
     # Verify MAC completed correctly despite interference attempts
     result_a = await read_register(dut, reg_sel=0)
@@ -1451,14 +1420,12 @@ async def test_mac_busy_protection(dut):
 @cocotb.test()
 async def test_mac_after_other_ops(dut):
     """Test MAC works correctly after other operations."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # ADD then MAC
     await load_register(dut, 10, reg_sel=0)
     await load_register(dut, 5, reg_sel=1)
-    await execute_opcode(dut, 0x1)  # 10 + 5 = 15
+    await execute_opcode(dut, OP_ADD)  # 10 + 5 = 15
     await load_register(dut, 2, reg_sel=1)
     await load_register(dut, 3, reg_sel=2)
     await execute_mac(dut)  # 15 + 2*3 = 21
@@ -1467,7 +1434,7 @@ async def test_mac_after_other_ops(dut):
     # SUB then MAC
     await load_register(dut, 100, reg_sel=0)
     await load_register(dut, 30, reg_sel=1)
-    await execute_opcode(dut, 0x2)  # 100 - 30 = 70
+    await execute_opcode(dut, OP_SUB)  # 100 - 30 = 70
     await load_register(dut, 10, reg_sel=1)
     await load_register(dut, 3, reg_sel=2)
     await execute_mac(dut)  # 70 + 10*3 = 100
@@ -1483,7 +1450,7 @@ async def test_mac_after_other_ops(dut):
     assert await read_register(dut, reg_sel=0) == 44
 
     # CLR then MAC
-    await execute_opcode(dut, 0x4)  # Clear all
+    await execute_opcode(dut, OP_CLR)  # Clear all
     await load_register(dut, 0, reg_sel=0)
     await load_register(dut, 100, reg_sel=1)
     await load_register(dut, 200, reg_sel=2)
@@ -1505,7 +1472,7 @@ async def test_mac_after_other_ops(dut):
     await load_register(dut, 10, reg_sel=2)
     await execute_mac(dut)  # 50 + 5*10 = 100
     await load_register(dut, 25, reg_sel=1)
-    await execute_opcode(dut, 0x1)  # 100 + 25 = 125
+    await execute_opcode(dut, OP_ADD)  # 100 + 25 = 125
     assert await read_register(dut, reg_sel=0) == 125
 
     dut._log.info("mac_after_other_ops: passed (6 operation sequences)")
@@ -1514,9 +1481,7 @@ async def test_mac_after_other_ops(dut):
 @cocotb.test()
 async def test_mac_power_of_two_folding(dut):
     """Test MAC with power-of-two values that trigger folding."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # 2^31 ≡ 1 (mod P), so products that equal 2^31 should fold to 1
     test_cases = [
@@ -1551,20 +1516,18 @@ async def test_mac_power_of_two_folding(dut):
         result = await read_register(dut, reg_sel=0)
         assert result == expected, f"MAC pow2 {desc}: expected {expected:#x}, got {result:#x}"
 
-    dut._log.info("mac_power_of_two_folding: passed (12 test vectors)")
+    dut._log.info(f"mac_power_of_two_folding: passed ({len(test_cases)} test vectors)")
 
 
 @cocotb.test()
 async def test_out_of_range_inputs(dut):
     """Verify arithmetic operates on [30:0] slices when bit 31 is set."""
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-    await reset_dut(dut)
+    await init_dut(dut)
 
     # Load P itself (0x7FFFFFFF) into reg_a — should behave as 0 in field
     await load_register(dut, P, reg_sel=0)
     await load_register(dut, 1, reg_sel=1)
-    await execute_opcode(dut, 0x1)  # ADD
+    await execute_opcode(dut, OP_ADD)
     result = await read_register(dut, reg_sel=0)
     # P[30:0] = P, add_raw = P + 1 = 0x80000000, fold = 0 + 1 = 1
     assert result == 1, f"P + 1 should give 1, got {result:#x}"
@@ -1572,14 +1535,14 @@ async def test_out_of_range_inputs(dut):
     # Load value with bit 31 set (0x80000001) — [30:0] = 1
     await load_register(dut, 0x80000001, reg_sel=0)
     await load_register(dut, 5, reg_sel=1)
-    await execute_opcode(dut, 0x1)  # ADD
+    await execute_opcode(dut, OP_ADD)
     result = await read_register(dut, reg_sel=0)
     assert result == 6, f"(0x80000001)[30:0] + 5 should give 6, got {result:#x}"
 
     # Load 0xFFFFFFFF — [30:0] = P = 0 in field, add 7 should give 7
     await load_register(dut, 0xFFFFFFFF, reg_sel=0)
     await load_register(dut, 7, reg_sel=1)
-    await execute_opcode(dut, 0x1)  # ADD
+    await execute_opcode(dut, OP_ADD)
     result = await read_register(dut, reg_sel=0)
     # 0xFFFFFFFF[30:0] = P, P + 7 = 0x80000006, fold = 6 + 1 = 7
     assert result == 7, f"0xFFFFFFFF + 7 should give 7, got {result:#x}"
@@ -1587,7 +1550,7 @@ async def test_out_of_range_inputs(dut):
     # Subtraction with bit 31 set in reg_b
     await load_register(dut, 10, reg_sel=0)
     await load_register(dut, 0x80000003, reg_sel=1)  # [30:0] = 3
-    await execute_opcode(dut, 0x2)  # SUB
+    await execute_opcode(dut, OP_SUB)
     result = await read_register(dut, reg_sel=0)
     assert result == 7, f"10 - (0x80000003)[30:0] should give 7, got {result:#x}"
 
